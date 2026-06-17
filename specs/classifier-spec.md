@@ -91,10 +91,16 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+Use this format:
+
+Label: <label>
+Reasoning: <one sentence explanation>
+
+Why: "Label: X" on its own line is easy to parse with a simple split — find
+the line starting with "Label:", take everything after the colon, strip and
+lowercase. JSON is more brittle (the model may add markdown code fences or
+trailing commas). A bare label with no structure makes it hard to extract
+reasoning reliably. This format balances parsability and readability.
 ```
 
 ---
@@ -102,8 +108,14 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+- Empty labeled_examples: include a note in the prompt that no examples are
+  available and ask the model to classify using only the label definitions.
+  The classifier will be less accurate but won't crash.
+- Very short description (< ~20 chars): no special handling needed — pass it
+  through as-is. The model will classify with whatever signal exists.
+- Description is None or empty string: guard in classify_episode() before
+  calling build_few_shot_prompt(); return {"label": "unknown", "reasoning":
+  "Empty description"} immediately.
 ```
 
 ---
@@ -159,9 +171,19 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+Iterate over the lines of the response text. For each line:
+  - If it starts with "label:" (case-insensitive), extract the text after the
+    colon, strip whitespace, and convert to lowercase → this is the raw label.
+  - If it starts with "reasoning:" (case-insensitive), extract the text after
+    the colon, strip whitespace → this is the reasoning string.
+
+Example:
+  for line in response_text.strip().splitlines():
+      lower = line.lower()
+      if lower.startswith("label:"):
+          raw_label = line.split(":", 1)[1].strip().lower()
+      elif lower.startswith("reasoning:"):
+          reasoning = line.split(":", 1)[1].strip()
 ```
 
 ---
@@ -169,8 +191,17 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+Import VALID_LABELS from config. After parsing raw_label, check:
+
+  if raw_label in VALID_LABELS:
+      label = raw_label
+  else:
+      label = "unknown"
+
+This handles cases where the model returns "Interview", "**interview**",
+"Label: interview (interview)", or anything else that doesn't exactly match.
+The lowercase conversion in Step 3 already handles capitalization, so only
+truly wrong values fall through to "unknown".
 ```
 
 ---
@@ -178,9 +209,21 @@ What should label be set to?]
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
+Wrap the entire function body in a try/except block:
+
+  try:
+      ... (steps 1–4)
+      return {"label": label, "reasoning": reasoning}
+  except Exception as e:
+      return {"label": "unknown", "reasoning": f"Error: {str(e)}"}
+
+What can go wrong:
+  - Network/API error → exception from the client call
+  - Response missing "Label:" line → raw_label never set → NameError or KeyError
+  - max_tokens too low → response truncated mid-line, "Label:" line missing
+
+Returning {"label": "unknown", ...} on any failure keeps the evaluation loop
+running for all 20 episodes instead of crashing on episode 3.
 ```
 
 ---
